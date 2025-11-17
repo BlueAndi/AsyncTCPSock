@@ -28,6 +28,8 @@
 
 #include <lwip/sockets.h>
 #include <lwip/netdb.h>
+#include <lwip/tcp.h>
+#include "lwip/tcpip.h"
 #include <errno.h>
 
 #include <lwip/dns.h>
@@ -38,6 +40,32 @@
 #undef connect
 #undef write
 #undef read
+
+// https://github.com/espressif/arduino-esp32/issues/10526
+namespace {
+#ifdef CONFIG_LWIP_TCPIP_CORE_LOCKING
+struct tcp_core_guard {
+  bool do_lock;
+  inline tcp_core_guard() : do_lock(!sys_thread_tcpip(LWIP_CORE_LOCK_QUERY_HOLDER)) {
+    if (do_lock) {
+      LOCK_TCPIP_CORE();
+    }
+  }
+  inline ~tcp_core_guard() {
+    if (do_lock) {
+      UNLOCK_TCPIP_CORE();
+    }
+  }
+  tcp_core_guard(const tcp_core_guard &) = delete;
+  tcp_core_guard(tcp_core_guard &&) = delete;
+  tcp_core_guard &operator=(const tcp_core_guard &) = delete;
+  tcp_core_guard &operator=(tcp_core_guard &&) = delete;
+} __attribute__((unused));
+#else   // CONFIG_LWIP_TCPIP_CORE_LOCKING
+struct tcp_core_guard {
+} __attribute__((unused));
+#endif  // CONFIG_LWIP_TCPIP_CORE_LOCKING
+}  // anonymous namespace
 
 static TaskHandle_t _asyncsock_service_task_handle = NULL;
 static SemaphoreHandle_t _asyncsock_mutex = NULL;
@@ -558,7 +586,12 @@ bool AsyncClient::connect(const char* host, uint16_t port){
     }
 
     log_v("connect to %s port %d using DNS...", host, port);
-    err_t err = dns_gethostbyname(host, &addr, (dns_found_callback)&_tcpsock_dns_found, this);
+    err_t err;
+    {
+        tcp_core_guard tcg;
+        err = dns_gethostbyname(host, &addr, (dns_found_callback)&_tcpsock_dns_found, this);
+    }
+
     if(err == ERR_OK) {
         log_v("\taddr resolved as %08x, connecting...", addr.u_addr.ip4.addr);
 #if ASYNC_TCP_SSL_ENABLED
